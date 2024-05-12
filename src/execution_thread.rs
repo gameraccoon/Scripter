@@ -57,42 +57,47 @@ pub struct ScriptExecutionData {
     pub thread_join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-pub fn new_execution_data() -> ScriptExecutionData {
-    ScriptExecutionData {
-        scripts_to_run: Vec::new(),
-        progress_receiver: None,
-        is_termination_requested: Arc::new(AtomicBool::new(false)),
-        thread_join_handle: None,
-    }
-}
-
-pub fn has_script_started(status: &ScriptExecutionStatus) -> bool {
-    return status.start_time.is_some();
-}
-
-pub fn has_script_finished(status: &ScriptExecutionStatus) -> bool {
-    if !has_script_started(status) {
-        return false;
-    }
-    return status.finish_time.is_some();
-}
-
-pub fn has_script_failed(status: &ScriptExecutionStatus) -> bool {
-    return has_script_finished(status) && status.result == ScriptResultStatus::Failed;
-}
-
-pub fn has_script_been_skipped(status: &ScriptExecutionStatus) -> bool {
-    return has_script_finished(status) && status.result == ScriptResultStatus::Skipped;
-}
-
-pub fn is_waiting_execution_thread_to_finish(execution_data: &ScriptExecutionData) -> bool {
-    // wait for the thread to finish, otherwise we can let the user to break their state
-    if let Some(join_handle) = &execution_data.thread_join_handle {
-        if !join_handle.is_finished() {
-            return true;
+impl ScriptExecutionData {
+    pub fn new() -> Self {
+        ScriptExecutionData {
+            scripts_to_run: Vec::new(),
+            progress_receiver: None,
+            is_termination_requested: Arc::new(AtomicBool::new(false)),
+            thread_join_handle: None,
         }
     }
-    return false;
+
+    pub fn is_waiting_execution_thread_to_finish(&self) -> bool {
+        // wait for the thread to finish, otherwise we can let the user to break their state
+        if let Some(join_handle) = &self.thread_join_handle {
+            if !join_handle.is_finished() {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+impl ScriptExecutionStatus {
+
+    pub fn has_script_started(self: &ScriptExecutionStatus) -> bool {
+        return self.start_time.is_some();
+    }
+
+    pub fn has_script_finished(self: &ScriptExecutionStatus) -> bool {
+        if !self.has_script_started() {
+            return false;
+        }
+        return self.finish_time.is_some();
+    }
+
+    pub fn has_script_failed(self: &ScriptExecutionStatus) -> bool {
+        return self.has_script_finished() && self.result == ScriptResultStatus::Failed;
+    }
+
+    pub fn has_script_been_skipped(self: &ScriptExecutionStatus) -> bool {
+        return self.has_script_finished() && self.result == ScriptResultStatus::Skipped;
+    }
 }
 
 pub fn add_script_to_execution(

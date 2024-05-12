@@ -27,7 +27,7 @@ use crate::color_utils;
 use crate::config;
 use crate::config::get_current_rewritable_config;
 use crate::custom_keybinds;
-use crate::execution;
+use crate::execution_thread;
 use crate::execution_lists;
 use crate::file_utils;
 use crate::git_support;
@@ -367,9 +367,9 @@ impl Application for MainWindow {
                 }
                 _ => "scripter [Editing]".to_string(),
             }
-        } else if self.execution_data.has_started_execution() {
-            if self.execution_data.has_finished_execution() {
-                if self.execution_data.has_failed_scripts() {
+        } else if self.execution_data.has_any_execution_started() {
+            if self.execution_data.has_all_executions_finished() {
+                if self.execution_data.has_any_execution_failed() {
                     "scripter [Finished with errors]".to_string()
                 } else {
                     "scripter [Finished]".to_string()
@@ -431,8 +431,8 @@ impl Application for MainWindow {
                 if self.window_state.has_maximized_pane {
                     return restore_window(self);
                 } else {
-                    if (self.execution_data.has_started_execution()
-                        || !self.execution_data.get_edited_execution_list().is_empty())
+                    if (self.execution_data.has_any_execution_started()
+                        || !self.execution_data.get_edited_scripts().is_empty())
                         && self.edit_data.window_edit_data.is_none()
                     {
                         return maximize_pane(
@@ -447,7 +447,7 @@ impl Application for MainWindow {
                 let is_added = add_script_to_execution(self, script_uid, true);
 
                 if is_added && self.window_state.is_command_key_down {
-                    run_scheduled_scripts(self);
+                    start_new_execution_from_scheduled_scripts(self);
                 }
             }
             WindowMessage::AddScriptToExecutionWithoutRunning(script_uid) => {
@@ -455,12 +455,12 @@ impl Application for MainWindow {
             }
             WindowMessage::RunScripts => {
                 if !self.edit_data.window_edit_data.is_some() {
-                    run_scheduled_scripts(self);
+                    start_new_execution_from_scheduled_scripts(self);
                 }
             }
             WindowMessage::StopScripts => {
-                if self.execution_data.has_started_execution()
-                    && !self.execution_data.has_finished_execution()
+                if self.execution_data.has_any_execution_failed()
+                    && !self.execution_data.has_all_executions_finished()
                 {
                     self.execution_data.request_stop_execution();
                 }
@@ -468,15 +468,15 @@ impl Application for MainWindow {
             WindowMessage::ClearEditedExecutionScripts => clear_edited_scripts(self),
             WindowMessage::ClearFinishedExecutionScripts => clear_execution_scripts(self),
             WindowMessage::ClearExecutionScripts => {
-                if !self.execution_data.get_edited_execution_list().is_empty() {
+                if !self.execution_data.get_edited_scripts().is_empty() {
                     clear_edited_scripts(self)
                 } else {
                     clear_execution_scripts(self)
                 }
             }
             WindowMessage::RescheduleScripts => {
-                if self.execution_data.has_started_execution()
-                    && self.execution_data.has_finished_execution()
+                if self.execution_data.has_any_execution_started()
+                    && self.execution_data.has_all_executions_finished()
                     && !self.execution_data.is_waiting_execution_to_finish()
                 {
                     self.execution_data.reschedule_scripts()
@@ -561,13 +561,13 @@ impl Application for MainWindow {
             }
             WindowMessage::MoveExecutionScriptUp(script_idx) => {
                 self.execution_data
-                    .get_edited_execution_list_mut()
+                    .get_edited_scripts_mut()
                     .swap(script_idx, script_idx - 1);
                 select_execution_script(self, script_idx - 1);
             }
             WindowMessage::MoveExecutionScriptDown(script_idx) => {
                 self.execution_data
-                    .get_edited_execution_list_mut()
+                    .get_edited_scripts_mut()
                     .swap(script_idx, script_idx + 1);
                 select_execution_script(self, script_idx + 1);
             }
@@ -657,7 +657,7 @@ impl Application for MainWindow {
             WindowMessage::EnterWindowEditMode => enter_window_edit_mode(self),
             WindowMessage::ExitWindowEditMode => exit_window_edit_mode(self),
             WindowMessage::TrySwitchWindowEditMode => {
-                if !self.execution_data.has_started_execution() {
+                if !self.execution_data.has_any_execution_started() {
                     if !self.edit_data.window_edit_data.is_some() {
                         enter_window_edit_mode(self);
                     } else {
@@ -1014,7 +1014,7 @@ impl Application for MainWindow {
                     items: vec![],
                 };
 
-                for script in self.execution_data.get_edited_execution_list() {
+                for script in self.execution_data.get_edited_scripts() {
                     match script {
                         config::ScriptDefinition::Original(script) => {
                             let original_script = config::get_original_script_definition_by_uid(
@@ -1114,8 +1114,8 @@ impl Application for MainWindow {
                     })
                 };
 
-                if self.execution_data.has_started_execution() {
-                    if self.execution_data.has_finished_execution() {
+                if self.execution_data.has_any_execution_started() {
+                    if self.execution_data.has_all_executions_finished() {
                         if !self.execution_data.is_waiting_execution_to_finish() {
                             return exit_thread_command();
                         }
@@ -1137,7 +1137,7 @@ impl Application for MainWindow {
                 move_cursor(self, false);
             }
             WindowMessage::MoveScriptDown => {
-                if self.execution_data.has_started_execution() {
+                if self.execution_data.has_any_execution_started() {
                     return Command::none();
                 }
 
@@ -1157,12 +1157,12 @@ impl Application for MainWindow {
                     if let Some(cursor_script) = &self.window_state.cursor_script {
                         if cursor_script.script_type == EditScriptType::ExecutionList {
                             if cursor_script.idx + 1
-                                >= self.execution_data.get_edited_execution_list().len()
+                                >= self.execution_data.get_edited_scripts().len()
                             {
                                 return Command::none();
                             }
                             self.execution_data
-                                .get_edited_execution_list_mut()
+                                .get_edited_scripts_mut()
                                 .swap(cursor_script.idx, cursor_script.idx + 1);
                             select_execution_script(self, cursor_script.idx + 1);
                         }
@@ -1189,7 +1189,7 @@ impl Application for MainWindow {
                                 return Command::none();
                             }
                             self.execution_data
-                                .get_edited_execution_list_mut()
+                                .get_edited_scripts_mut()
                                 .swap(cursor_script.idx, cursor_script.idx - 1);
                             select_execution_script(self, cursor_script.idx - 1);
                         }
@@ -1219,14 +1219,14 @@ impl Application for MainWindow {
                             );
 
                             if is_added && self.window_state.is_command_key_down {
-                                run_scheduled_scripts(self);
+                                start_new_execution_from_scheduled_scripts(self);
                             }
                         }
                     }
                 }
             }
             WindowMessage::RemoveCursorScript => {
-                if self.execution_data.has_started_execution() {
+                if self.execution_data.has_any_execution_started() {
                     return Command::none();
                 }
 
@@ -1424,9 +1424,9 @@ impl Application for MainWindow {
                     ))
                     .padding(10)
                     .style(if is_focused {
-                        if self.execution_data.has_failed_scripts() {
+                        if self.execution_data.has_all_executions_finished() {
                             style::title_bar_focused_failed
-                        } else if self.execution_data.has_finished_execution() {
+                        } else if self.execution_data.has_all_executions_finished() {
                             style::title_bar_focused_completed
                         } else {
                             style::title_bar_focused
@@ -1986,78 +1986,62 @@ fn produce_execution_list_content<'a>(
         ]
     };
 
-    let scheduled_data: Element<_> = column(
-        execution_lists
-            .get_scheduled_execution_list()
-            .iter()
-            .zip(execution_lists.get_scheduled_execution_statuses().iter())
-            .enumerate()
-            .map(|(i, (script, script_status))| {
-                let config::ScriptDefinition::Original(script) = script else {
-                    panic!("execution list definition is not Original");
-                };
-                let script_name = &script.name;
+    let mut data_lines: Vec<Element<'_, WindowMessage, Theme, iced::Renderer>> = Vec::new();
+    for execution in execution_lists.get_execution_lists() {
+        let scripts_cache = execution.get_scheduled_scripts_cache();
+        let script_statuses = execution.get_scheduled_scripts_statuses();
+        assert_eq!(scripts_cache.len(), script_statuses.len());
+        for i in 0..scripts_cache.len() {
+            let script = &scripts_cache[i];
+            let script_status = &script_statuses[i];
+            let config::ScriptDefinition::Original(script) = script else {
+                panic!("execution list definition is not Original");
+            };
+            let script_name = &script.name;
 
-                let repeat_text = if script_status.retry_count > 0 {
-                    format!(
-                        " [{}/{}]",
-                        script_status.retry_count, script.autorerun_count
+            let repeat_text = if script_status.retry_count > 0 {
+                format!(
+                    " [{}/{}]",
+                    script_status.retry_count, script.autorerun_count
+                )
+            } else {
+                String::new()
+            };
+
+            let status;
+            let status_tooltip;
+            let progress;
+            let style = if script_status.has_script_failed() {
+                if let Some(custom_theme) = &rewritable_config.custom_theme {
+                    iced::Color::from_rgb(
+                        custom_theme.error_text[0],
+                        custom_theme.error_text[1],
+                        custom_theme.error_text[2],
                     )
                 } else {
-                    String::new()
-                };
+                    theme.extended_palette().danger.weak.color
+                }
+            } else {
+                theme.extended_palette().background.strong.text
+            };
 
-                let status;
-                let status_tooltip;
-                let progress;
-                let style = if execution::has_script_failed(script_status) {
-                    if let Some(custom_theme) = &rewritable_config.custom_theme {
-                        iced::Color::from_rgb(
-                            custom_theme.error_text[0],
-                            custom_theme.error_text[1],
-                            custom_theme.error_text[2],
-                        )
-                    } else {
-                        theme.extended_palette().danger.weak.color
-                    }
-                } else {
-                    theme.extended_palette().background.strong.text
+            if script_status.has_script_finished() {
+                status = match script_status.result {
+                    execution_thread::ScriptResultStatus::Failed => image(icons.failed.clone()),
+                    execution_thread::ScriptResultStatus::Success => image(icons.succeeded.clone()),
+                    execution_thread::ScriptResultStatus::Skipped => image(icons.skipped.clone()),
                 };
-
-                if execution::has_script_finished(script_status) {
-                    status = match script_status.result {
-                        execution::ScriptResultStatus::Failed => image(icons.failed.clone()),
-                        execution::ScriptResultStatus::Success => image(icons.succeeded.clone()),
-                        execution::ScriptResultStatus::Skipped => image(icons.skipped.clone()),
-                    };
-                    status_tooltip = match script_status.result {
-                        execution::ScriptResultStatus::Failed => "Failed",
-                        execution::ScriptResultStatus::Success => "Success",
-                        execution::ScriptResultStatus::Skipped => "Skipped",
-                    };
-                    if script_status.result != execution::ScriptResultStatus::Skipped {
-                        let time_taken_sec = script_status
-                            .finish_time
-                            .unwrap_or(Instant::now())
-                            .duration_since(script_status.start_time.unwrap_or(Instant::now()))
-                            .as_secs();
-                        progress = text(format!(
-                            " ({:02}:{:02}){}",
-                            time_taken_sec / 60,
-                            time_taken_sec % 60,
-                            repeat_text,
-                        ))
-                        .style(style);
-                    } else {
-                        progress = text("").style(style);
-                    }
-                } else if execution::has_script_started(script_status) {
-                    let time_taken_sec = Instant::now()
+                status_tooltip = match script_status.result {
+                    execution_thread::ScriptResultStatus::Failed => "Failed",
+                    execution_thread::ScriptResultStatus::Success => "Success",
+                    execution_thread::ScriptResultStatus::Skipped => "Skipped",
+                };
+                if script_status.result != execution_thread::ScriptResultStatus::Skipped {
+                    let time_taken_sec = script_status
+                        .finish_time
+                        .unwrap_or(Instant::now())
                         .duration_since(script_status.start_time.unwrap_or(Instant::now()))
                         .as_secs();
-                    status = image(icons.in_progress.clone());
-                    status_tooltip = "In progress";
-
                     progress = text(format!(
                         " ({:02}:{:02}){}",
                         time_taken_sec / 60,
@@ -2066,83 +2050,176 @@ fn produce_execution_list_content<'a>(
                     ))
                     .style(style);
                 } else {
-                    status = image(icons.idle.clone());
-                    status_tooltip = "Idle";
                     progress = text("").style(style);
-                };
+                }
+            } else if script_status.has_script_started() {
+                let time_taken_sec = Instant::now()
+                    .duration_since(script_status.start_time.unwrap_or(Instant::now()))
+                    .as_secs();
+                status = image(icons.in_progress.clone());
+                status_tooltip = "In progress";
 
-                let mut row_data: Vec<Element<'_, WindowMessage, Theme, iced::Renderer>> =
-                    Vec::new();
+                progress = text(format!(
+                    " ({:02}:{:02}){}",
+                    time_taken_sec / 60,
+                    time_taken_sec % 60,
+                    repeat_text,
+                ))
+                .style(style);
+            } else {
+                status = image(icons.idle.clone());
+                status_tooltip = "Idle";
+                progress = text("").style(style);
+            };
+
+            let mut row_data: Vec<Element<'_, WindowMessage, Theme, iced::Renderer>> = Vec::new();
+            row_data.push(
+                tooltip(
+                    status.width(22).height(22).content_fit(ContentFit::None),
+                    status_tooltip,
+                    tooltip::Position::Right,
+                )
+                .style(theme::Container::Box)
+                .into(),
+            );
+            row_data.push(Space::with_width(4).into());
+            if !script.icon.path.is_empty() {
                 row_data.push(
-                    tooltip(
-                        status.width(22).height(22).content_fit(ContentFit::None),
-                        status_tooltip,
-                        tooltip::Position::Right,
-                    )
-                    .style(theme::Container::Box)
-                    .into(),
+                    image(config::get_full_path(path_caches, &script.icon))
+                        .width(22)
+                        .height(22)
+                        .into(),
                 );
                 row_data.push(Space::with_width(4).into());
-                if !script.icon.path.is_empty() {
-                    row_data.push(
-                        image(config::get_full_path(path_caches, &script.icon))
-                            .width(22)
-                            .height(22)
-                            .into(),
-                    );
-                    row_data.push(Space::with_width(4).into());
-                }
-                row_data.push(text(script_name).style(style).into());
-                row_data.push(progress.into());
+            }
+            row_data.push(text(script_name).style(style).into());
+            row_data.push(progress.into());
 
-                if execution::has_script_started(&script_status) {
-                    row_data.push(Space::with_width(8).into());
-                    if script_status.retry_count > 0 {
-                        let log_dir_path = execution_lists.get_log_path();
-                        row_data.push(
-                            tooltip(
-                                inline_icon_button(
-                                    icons.themed.log.clone(),
-                                    WindowMessage::OpenWithDefaultApplication(log_dir_path),
-                                ),
-                                "Open log directory",
-                                tooltip::Position::Right,
-                            )
-                            .style(theme::Container::Box)
-                            .into(),
-                        );
-                    } else if !execution::has_script_been_skipped(&script_status) {
-                        let output_path = file_utils::get_script_output_path(
-                            execution_lists.get_log_path().clone(),
-                            script_name,
-                            i as isize,
-                            script_status.retry_count,
-                        );
-                        row_data.push(
-                            tooltip(
-                                inline_icon_button(
-                                    icons.themed.log.clone(),
-                                    WindowMessage::OpenWithDefaultApplication(output_path),
-                                ),
-                                "Open log file",
-                                tooltip::Position::Right,
-                            )
-                            .style(theme::Container::Box)
-                            .into(),
-                        );
-                    }
+            if script_status.has_script_started() {
+                row_data.push(Space::with_width(8).into());
+                if script_status.retry_count > 0 {
+                    let log_dir_path = execution.get_log_path();
+                    row_data.push(
+                        tooltip(
+                            inline_icon_button(
+                                icons.themed.log.clone(),
+                                WindowMessage::OpenWithDefaultApplication(log_dir_path.clone()),
+                            ),
+                            "Open log directory",
+                            tooltip::Position::Right,
+                        )
+                        .style(theme::Container::Box)
+                        .into(),
+                    );
+                } else if !script_status.has_script_been_skipped() {
+                    let output_path = file_utils::get_script_output_path(
+                        execution.get_log_path().clone(),
+                        script_name,
+                        i as isize,
+                        script_status.retry_count,
+                    );
+                    row_data.push(
+                        tooltip(
+                            inline_icon_button(
+                                icons.themed.log.clone(),
+                                WindowMessage::OpenWithDefaultApplication(output_path),
+                            ),
+                            "Open log file",
+                            tooltip::Position::Right,
+                        )
+                        .style(theme::Container::Box)
+                        .into(),
+                    );
                 }
-                row(row_data).height(30).into()
-            })
-            .collect::<Vec<_>>(),
-    )
-    .width(Length::Fill)
-    .align_items(Alignment::Start)
-    .into();
+            }
+            data_lines.push(row(row_data).height(30).into());
+        }
+
+        data_lines.push(Space::with_height(8).into());
+
+        data_lines.push(
+            if execution_lists.has_all_executions_finished() {
+                if !execution_lists.is_waiting_execution_to_finish() {
+                    row![
+                        if window_state.is_command_key_down {
+                            main_icon_button_string(
+                                icons.themed.retry.clone(),
+                                format_keybind_hint(
+                                    visual_caches,
+                                    "Reschedule",
+                                    config::AppAction::RescheduleScripts,
+                                ),
+                                Some(WindowMessage::RescheduleScripts),
+                            )
+                        } else {
+                            main_icon_button(
+                                icons.themed.retry.clone(),
+                                "Reschedule",
+                                Some(WindowMessage::RescheduleScripts),
+                            )
+                        },
+                        main_icon_button_string(
+                            icons.themed.remove.clone(),
+                            if window_state.is_command_key_down
+                                && execution_lists.get_edited_scripts().is_empty()
+                            {
+                                format_keybind_hint(
+                                    visual_caches,
+                                    "Clear",
+                                    config::AppAction::ClearExecutionScripts,
+                                )
+                            } else {
+                                "Clear".to_string()
+                            },
+                            Some(WindowMessage::ClearFinishedExecutionScripts)
+                        ),
+                    ]
+                    .align_items(Alignment::Center)
+                    .spacing(5)
+                } else {
+                    row![text("Waiting for the execution to stop")].align_items(Alignment::Center)
+                }
+            } else if execution_lists.has_any_execution_started() {
+                let current_script = execution.get_currently_outputting_script();
+                if current_script != -1
+                    && script_statuses[current_script as usize].has_script_failed()
+                {
+                    row![text("Waiting for the execution to stop")].align_items(Alignment::Center)
+                } else {
+                    if window_state.is_command_key_down {
+                        row![main_icon_button_string(
+                            icons.themed.stop.clone(),
+                            format_keybind_hint(
+                                visual_caches,
+                                "Stop",
+                                config::AppAction::StopScripts
+                            ),
+                            Some(WindowMessage::StopScripts)
+                        )]
+                    } else {
+                        row![main_icon_button(
+                            icons.themed.stop.clone(),
+                            "Stop",
+                            Some(WindowMessage::StopScripts)
+                        )]
+                    }
+                    .align_items(Alignment::Center)
+                }
+            } else {
+                row![]
+            }
+            .into(),
+        );
+
+        data_lines.push(Space::with_height(8).into());
+    }
+    let scheduled_block = column(data_lines)
+        .width(Length::Fill)
+        .align_items(Alignment::Start);
 
     let edited_data: Element<_> = column(
         execution_lists
-            .get_edited_execution_list()
+            .get_edited_scripts()
             .iter()
             .enumerate()
             .map(|(i, script)| {
@@ -2192,7 +2269,7 @@ fn produce_execution_list_content<'a>(
                             .into(),
                         );
                     }
-                    if i + 1 < execution_lists.get_edited_execution_list().len() {
+                    if i + 1 < execution_lists.get_edited_scripts().len() {
                         row_data.push(
                             inline_icon_button(
                                 icons.themed.down.clone(),
@@ -2254,82 +2331,10 @@ fn produce_execution_list_content<'a>(
     .align_items(Alignment::Start)
     .into();
 
-    let execution_controls = column![if execution_lists.has_finished_execution() {
-        if !execution_lists.is_waiting_execution_to_finish() {
-            row![
-                if window_state.is_command_key_down {
-                    main_icon_button_string(
-                        icons.themed.retry.clone(),
-                        format_keybind_hint(
-                            visual_caches,
-                            "Reschedule",
-                            config::AppAction::RescheduleScripts,
-                        ),
-                        Some(WindowMessage::RescheduleScripts),
-                    )
-                } else {
-                    main_icon_button(
-                        icons.themed.retry.clone(),
-                        "Reschedule",
-                        Some(WindowMessage::RescheduleScripts),
-                    )
-                },
-                main_icon_button_string(
-                    icons.themed.remove.clone(),
-                    if window_state.is_command_key_down
-                        && execution_lists.get_edited_execution_list().is_empty()
-                    {
-                        format_keybind_hint(
-                            visual_caches,
-                            "Clear",
-                            config::AppAction::ClearExecutionScripts,
-                        )
-                    } else {
-                        "Clear".to_string()
-                    },
-                    Some(WindowMessage::ClearFinishedExecutionScripts)
-                ),
-            ]
-            .align_items(Alignment::Center)
-            .spacing(5)
-        } else {
-            row![text("Waiting for the execution to stop")].align_items(Alignment::Center)
-        }
-    } else if execution_lists.has_started_execution() {
-        let current_script = execution_lists.get_currently_outputting_script();
-        if current_script != -1
-            && execution::has_script_failed(
-                &execution_lists.get_scheduled_execution_statuses()[current_script as usize],
-            )
-        {
-            row![text("Waiting for the execution to stop")].align_items(Alignment::Center)
-        } else {
-            if window_state.is_command_key_down {
-                row![main_icon_button_string(
-                    icons.themed.stop.clone(),
-                    format_keybind_hint(visual_caches, "Stop", config::AppAction::StopScripts),
-                    Some(WindowMessage::StopScripts)
-                )]
-            } else {
-                row![main_icon_button(
-                    icons.themed.stop.clone(),
-                    "Stop",
-                    Some(WindowMessage::StopScripts)
-                )]
-            }
-            .align_items(Alignment::Center)
-        }
-    } else {
-        row![].into()
-    }]
-    .spacing(5)
-    .width(Length::Fill)
-    .align_items(Alignment::Center);
-
     let edit_controls = column![if edit_data.window_edit_data.is_some() {
         row![main_button(
             "Save as preset",
-            if !execution_lists.get_edited_execution_list().is_empty() {
+            if !execution_lists.get_edited_scripts().is_empty() {
                 Some(WindowMessage::SaveAsPreset)
             } else {
                 None
@@ -2337,9 +2342,9 @@ fn produce_execution_list_content<'a>(
         )]
         .align_items(Alignment::Center)
         .spacing(5)
-    } else if !execution_lists.get_edited_execution_list().is_empty() {
+    } else if !execution_lists.get_edited_scripts().is_empty() {
         let has_scripts_missing_arguments = execution_lists
-            .get_edited_execution_list()
+            .get_edited_scripts()
             .iter()
             .any(|script| is_script_missing_arguments(script));
 
@@ -2388,13 +2393,6 @@ fn produce_execution_list_content<'a>(
     .width(Length::Fill)
     .align_items(Alignment::Center);
 
-    let scheduled_block = column![
-        scheduled_data,
-        Space::with_height(8),
-        execution_controls,
-        Space::with_height(8),
-    ];
-
     let edited_block = column![
         edited_data,
         Space::with_height(8),
@@ -2410,7 +2408,7 @@ fn produce_execution_list_content<'a>(
             } else {
                 column![]
             },
-            if !execution_lists.get_edited_execution_list().is_empty()
+            if !execution_lists.get_edited_scripts().is_empty()
                 || edit_data.window_edit_data.is_some()
             {
                 edited_block
@@ -2430,7 +2428,7 @@ fn produce_log_output_content<'a>(
     theme: &Theme,
     rewritable_config: &config::RewritableConfig,
 ) -> Column<'a, WindowMessage> {
-    if !execution_lists.has_started_execution() {
+    if !execution_lists.has_any_execution_started() {
         return Column::new();
     }
 
@@ -2465,10 +2463,10 @@ fn produce_log_output_content<'a>(
                     element.text
                 ))
                 .style(match element.output_type {
-                    execution::OutputType::StdOut => theme.extended_palette().primary.weak.text,
-                    execution::OutputType::StdErr => error_color,
-                    execution::OutputType::Error => error_color,
-                    execution::OutputType::Event => caption_color,
+                    execution_thread::OutputType::StdOut => theme.extended_palette().primary.weak.text,
+                    execution_thread::OutputType::StdErr => error_color,
+                    execution_thread::OutputType::Error => error_color,
+                    execution_thread::OutputType::Event => caption_color,
                 })
                 .into()
             }));
@@ -2516,7 +2514,7 @@ fn produce_script_edit_content<'a>(
     let script = if currently_edited_script.script_type == EditScriptType::ScriptConfig {
         get_script_definition(&app_config, edit_data, currently_edited_script.idx)
     } else {
-        &execution_lists.get_edited_execution_list()[currently_edited_script.idx]
+        &execution_lists.get_edited_scripts()[currently_edited_script.idx]
     };
 
     let mut parameters: Vec<Element<'_, WindowMessage, Theme, iced::Renderer>> = Vec::new();
@@ -3097,7 +3095,7 @@ fn view_controls<'a>(
         && !config.is_read_only
         && !edit_data.is_dirty
         && !edit_data.window_edit_data.is_some()
-        && !execution_lists.has_started_execution()
+        && !execution_lists.has_any_execution_started()
     {
         row = row.push(
             tooltip(
@@ -3117,8 +3115,8 @@ fn view_controls<'a>(
     if total_panes > 1
         && (is_maximized
             || (*variant == PaneVariant::ExecutionList
-                && (execution_lists.has_started_execution()
-                    || !execution_lists.get_edited_execution_list().is_empty())
+                && (execution_lists.has_any_execution_started()
+                    || !execution_lists.get_edited_scripts().is_empty())
                 && edit_data.window_edit_data.is_none()))
     {
         let toggle = {
@@ -3209,7 +3207,7 @@ fn apply_script_edit(
                 },
             },
             EditScriptType::ExecutionList => {
-                match &mut app.execution_data.get_edited_execution_list_mut()[script_id.idx] {
+                match &mut app.execution_data.get_edited_scripts_mut()[script_id.idx] {
                     config::ScriptDefinition::Original(script) => {
                         edit_fn(script);
                     }
@@ -3729,25 +3727,25 @@ fn exit_window_edit_mode(app: &mut MainWindow) {
     update_git_branch_visibility(app);
 }
 
-fn run_scheduled_scripts(app: &mut MainWindow) {
-    if app.execution_data.get_edited_execution_list().is_empty() {
+fn start_new_execution_from_scheduled_scripts(app: &mut MainWindow) {
+    if app.execution_data.get_edited_scripts().is_empty() {
         return;
     }
 
     if app
         .execution_data
-        .get_edited_execution_list()
+        .get_edited_scripts()
         .iter()
         .any(|script| is_script_missing_arguments(script))
     {
         return;
     }
 
-    if !app.execution_data.has_started_execution() {
+    if !app.execution_data.has_any_execution_started() {
         app.visual_caches.recent_logs.clear();
     }
     clean_script_selection(&mut app.window_state.cursor_script);
-    app.execution_data.start_execution(&app.app_config);
+    app.execution_data.start_new_execution(&app.app_config);
 
     app.edit_data.script_filter = String::new();
     update_config_cache(app);
@@ -3773,7 +3771,7 @@ fn add_script_to_execution(
         }
         config::ScriptDefinition::Original(_) => {
             app.execution_data
-                .add_script_to_execution(original_script.clone());
+                .add_script_to_edited_list(original_script.clone());
         }
         config::ScriptDefinition::Preset(preset) => {
             for preset_item in &preset.items {
@@ -3806,14 +3804,14 @@ fn add_script_to_execution(
                         _ => {}
                     };
 
-                    app.execution_data.add_script_to_execution(new_script);
+                    app.execution_data.add_script_to_edited_list(new_script);
                 }
             }
         }
     }
 
     if should_focus {
-        let script_idx = app.execution_data.get_edited_execution_list().len() - 1;
+        let script_idx = app.execution_data.get_edited_scripts().len() - 1;
         select_execution_script(app, script_idx);
         app.window_state.pane_focus = Some(app.pane_by_pane_type[&PaneVariant::ExecutionList]);
     }
@@ -3840,8 +3838,8 @@ fn clear_edited_scripts(app: &mut MainWindow) {
 }
 
 fn clear_execution_scripts(app: &mut MainWindow) {
-    if app.execution_data.has_started_execution()
-        && (!app.execution_data.has_finished_execution()
+    if app.execution_data.has_any_execution_started()
+        && (!app.execution_data.has_all_executions_finished()
             || app.execution_data.is_waiting_execution_to_finish())
     {
         return;
@@ -3854,7 +3852,7 @@ fn clear_execution_scripts(app: &mut MainWindow) {
 fn select_edited_script(app: &mut MainWindow, script_idx: usize) {
     set_selected_script(
         &mut app.window_state.cursor_script,
-        &app.execution_data.get_edited_execution_list(),
+        &app.execution_data.get_edited_scripts(),
         &get_script_definition_list_opt(&app.app_config, &app.edit_data.window_edit_data),
         &mut app.visual_caches,
         script_idx,
@@ -3868,8 +3866,8 @@ fn select_edited_script(app: &mut MainWindow, script_idx: usize) {
 fn select_execution_script(app: &mut MainWindow, script_idx: usize) {
     set_selected_script(
         &mut app.window_state.cursor_script,
-        &app.execution_data.get_edited_execution_list(),
-        &app.execution_data.get_edited_execution_list(),
+        &app.execution_data.get_edited_scripts(),
+        &app.execution_data.get_edited_scripts(),
         &mut app.visual_caches,
         script_idx,
         EditScriptType::ExecutionList,
@@ -3957,7 +3955,7 @@ fn move_cursor(app: &mut MainWindow, is_up: bool) {
 
         let scripts_count = match focused_pane {
             PaneVariant::ScriptList => app.displayed_configs_list_cache.len(),
-            PaneVariant::ExecutionList => app.execution_data.get_edited_execution_list().len(),
+            PaneVariant::ExecutionList => app.execution_data.get_edited_scripts().len(),
             _ => unreachable!(),
         };
 
@@ -4012,7 +4010,7 @@ fn get_next_pane_selection(app: &MainWindow, is_forward: bool) -> PaneVariant {
             .as_ref()
             .map(|s| &s.script_type);
 
-        let have_scripts_in_execution = !app.execution_data.get_edited_execution_list().is_empty();
+        let have_scripts_in_execution = !app.execution_data.get_edited_scripts().is_empty();
         let have_parameters_open = if let Some(selected_script_type) = selected_script_type {
             selected_script_type == &EditScriptType::ExecutionList || is_editing
         } else {
@@ -4088,7 +4086,8 @@ fn remove_script(app: &mut MainWindow, script_id: &EditScriptId) {
             update_config_cache(app);
         }
         EditScriptType::ExecutionList => {
-            app.execution_data.remove_script(script_id.idx);
+            app.execution_data
+                .remove_script_from_edited_list(script_id.idx);
         }
     }
     clean_script_selection(&mut app.window_state.cursor_script);
@@ -4119,7 +4118,7 @@ fn maximize_pane(
 
         let scheduled_elements_count =
             app.execution_data.get_scheduled_execution_list().len() as u32;
-        let edited_elements_count = app.execution_data.get_edited_execution_list().len() as u32;
+        let edited_elements_count = app.execution_data.get_edited_scripts().len() as u32;
         let mut title_lines = if app.visual_caches.is_custom_title_editing {
             // for now the edit field is only one line high
             1

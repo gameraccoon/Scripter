@@ -8,7 +8,7 @@ mod color_utils;
 mod config;
 mod config_updaters;
 mod custom_keybinds;
-mod execution;
+mod execution_thread;
 mod execution_lists;
 mod file_utils;
 mod git_support;
@@ -20,6 +20,7 @@ mod ring_buffer;
 mod sparse_set;
 mod style;
 mod ui_icons;
+mod sparse_set;
 
 use iced::window::icon;
 use iced::{Application, Settings};
